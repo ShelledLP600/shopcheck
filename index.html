@@ -3,7 +3,22 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ShopCheck — Fair-price calculator</title>
+<title>ShopCheck — Is your mechanic overcharging you?</title>
+<meta name="description" content="Free instant estimate of what an auto repair should actually cost in your area — before you pay. Check labor and parts against fair regional pricing.">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://shopcheck.app/">
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Is your mechanic overcharging you? — ShopCheck">
+<meta property="og:description" content="Get a free, instant fair-price estimate for any auto repair before you pay. Labor + parts, priced for your ZIP.">
+<meta property="og:url" content="https://shopcheck.app/">
+<meta property="og:image" content="https://shopcheck.app/og.png">
+<meta property="og:site_name" content="ShopCheck">
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Is your mechanic overcharging you? — ShopCheck">
+<meta name="twitter:description" content="Free instant fair-price estimate for any auto repair, priced for your ZIP.">
+<meta name="twitter:image" content="https://shopcheck.app/og.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600&display=swap" rel="stylesheet">
@@ -266,6 +281,22 @@
   .err-banner { display: none; margin-top: 14px; background: var(--bad-soft); color: var(--bad); border-radius: 10px; padding: 11px 14px; font-size: 13.5px; font-weight: 500; }
   .err-banner.show { display: block; }
 
+  .capture { margin-top: 14px; border: 1.5px solid var(--line); border-radius: 14px; padding: 15px 16px; background: var(--panel-2); }
+  .capture-head { font-family: var(--disp); font-weight: 600; font-size: 14px; color: var(--ink); margin-bottom: 11px; }
+  .capture-row { display: grid; grid-template-columns: 1fr auto; gap: 9px; }
+  .capture-row input { margin: 0; }
+  .capture-row button {
+    font-family: var(--disp); font-weight: 600; font-size: 14px; white-space: nowrap;
+    padding: 0 18px; border-radius: 10px; border: none; cursor: pointer;
+    background: var(--accent); color: var(--on-accent); transition: filter .14s, opacity .14s;
+  }
+  .capture-row button:hover { filter: brightness(1.06); }
+  .capture-row button:disabled { opacity: .55; cursor: default; }
+  .capture-msg { font-size: 12.5px; color: var(--ink-soft); margin-top: 9px; min-height: 16px; }
+  .capture-msg.ok { color: var(--good); font-weight: 600; }
+  .capture-msg.bad { color: var(--bad); font-weight: 600; }
+  .capture.done .capture-row { display: none; }
+
   footer { margin-top: 22px; text-align: center; font-size: 12px; color: var(--ink-faint); line-height: 1.6; max-width: 620px; }
 
   @media (max-width: 820px) {
@@ -397,6 +428,15 @@
           <div class="explain-note">
             <span class="i">💡</span>
             <span>A shop adding <b>10–30%</b> for inspection or small extras is normal. If a quote sits well above the right edge of the bar, get a second opinion.</span>
+          </div>
+
+          <div class="capture" id="capture">
+            <div class="capture-head">Get this estimate + a heads-up if you're being overcharged</div>
+            <div class="capture-row">
+              <input type="email" id="leadEmail" placeholder="you@email.com" autocomplete="email">
+              <button id="leadBtn">Send it</button>
+            </div>
+            <div class="capture-msg" id="captureMsg"></div>
           </div>
 
           <div class="err-banner" id="errBanner"></div>
@@ -643,18 +683,69 @@ window.ShopCheckEngine = (function () {
     }
   };
 
+  /* ---- Vehicle-aware adjustment ----
+     Labor book-hours come from curated flat-rate estimates; we adjust for
+     vehicle tier and age so a luxury/euro car isn't priced like an economy car.
+     Transparent multiplier, not a black box. */
+  const LUXURY_MAKES  = ['bmw','mercedes','mercedes-benz','audi','lexus','porsche','jaguar','land rover','range rover','volvo','acura','infiniti','cadillac','lincoln','tesla','genesis','maserati','bentley'];
+  const TRUCK_MAKES   = ['ram','gmc'];
+  const VehicleData = {
+    multiplier(vehicle) {
+      let m = 1.0; const notes = [];
+      const make = (vehicle && vehicle.make || '').toLowerCase().trim();
+      const year = +(vehicle && vehicle.year) || 0;
+      if (LUXURY_MAKES.some(x => make.includes(x))) { m *= 1.25; notes.push('luxury/import labor'); }
+      else if (TRUCK_MAKES.some(x => make.includes(x))) { m *= 1.10; notes.push('truck/HD'); }
+      if (year && year < (new Date().getFullYear() - 12)) { m *= 1.08; notes.push('older vehicle (seized/rusted hardware)'); }
+      return { factor: +m.toFixed(3), notes };
+    }
+  };
+
+  /* ---- Parts price adapter ----
+     If a live parts endpoint is configured (Vercel function proxying the
+     eBay Browse API), use real market prices. Otherwise fall back to the
+     curated typical-price estimate. */
+  const PartsData = {
+    async getPrice(repair, vehicle) {
+      const endpoint = (window.SHOPCHECK_CONFIG && window.SHOPCHECK_CONFIG.partsEndpoint) || null;
+      if (endpoint && repair.parts > 0) {
+        try {
+          const q = encodeURIComponent(`${vehicle.year||''} ${vehicle.make||''} ${vehicle.model||''} ${repair.name}`.trim());
+          const r = await fetch(`${endpoint}?q=${q}`, { signal: AbortSignal.timeout(4000) });
+          if (r.ok) {
+            const d = await r.json();
+            if (d && typeof d.median === 'number' && d.count >= 3) {
+              return { price: d.median, source: 'live', count: d.count };
+            }
+          }
+        } catch (_) { /* fall through to curated */ }
+      }
+      return { price: repair.parts || 0, source: 'estimate', count: 0 };
+    }
+  };
+
   /* ---- Main calculation ---- */
   async function calculate(repairKey, zipCode, vehicle) {
+    vehicle = vehicle || {};
     const repair = await LaborData.lookup(repairKey);
     if (!repair) throw new Error('Could not find that repair in our database.');
     const rateInfo = await RateData.getRate(zipCode);
-    const laborCost = repair.hours * rateInfo.rate;
-    const partsCost = repair.parts || 0;
+    const vadj = VehicleData.multiplier(vehicle);
+    const parts = await PartsData.getPrice(repair, vehicle);
+
+    const laborCost = repair.hours * rateInfo.rate * vadj.factor;
+    const partsCost = parts.price;
     const totalCost = laborCost + partsCost;
-    return { repair, rateInfo, laborCost, partsCost, totalCost, low: totalCost * 0.80, high: totalCost * 1.20 };
+    // Tighter range when parts are live-priced; wider when fully estimated.
+    const spread = parts.source === 'live' ? 0.14 : 0.20;
+    return {
+      repair, rateInfo, laborCost, partsCost, totalCost,
+      low: totalCost * (1 - spread), high: totalCost * (1 + spread),
+      vehicleAdj: vadj, partsSource: parts.source, partsCount: parts.count
+    };
   }
 
-  return { LaborData, RateData, calculate };
+  return { LaborData, RateData, VehicleData, PartsData, calculate };
 })();
 </script>
 
@@ -734,10 +825,17 @@ async function recompute() {
   $('#rLow').textContent = money(res.low);
   $('#rHigh').textContent = money(res.high);
   $('#rLabor').textContent = money(res.laborCost);
-  $('#rLaborSub').textContent = `~${res.repair.hours} ${res.repair.hours === 1 ? 'hr' : 'hrs'} × ${money(res.rateInfo.rate)}/hr`;
+  const adjNote = res.vehicleAdj.factor !== 1 ? ` · adj ×${res.vehicleAdj.factor}` : '';
+  $('#rLaborSub').textContent = `~${res.repair.hours} ${res.repair.hours === 1 ? 'hr' : 'hrs'} × ${money(res.rateInfo.rate)}/hr${adjNote}`;
   $('#rParts').textContent = res.partsCost > 0 ? money(res.partsCost) : 'Included';
-  $('#rPartsSub').textContent = res.partsCost > 0 ? 'Typical part price. Brand-name can run higher.' : 'Mostly labor — no major part to buy.';
+  $('#rPartsSub').textContent = res.partsCost > 0
+    ? (res.partsSource === 'live' ? `Live market price · ${res.partsCount} listings` : 'Typical part price. Brand-name can run higher.')
+    : 'Mostly labor — no major part to buy.';
   card.classList.add('has-result');
+
+  // Expose current estimate for capture + log the run (this is how the GTM test is measured)
+  window.__lastEstimate = { repair: res.repair.name, zip, total: Math.round(res.totalCost), low: Math.round(res.low), high: Math.round(res.high), region: res.rateInfo.region, vehicle: vparts || null, parts_source: res.partsSource };
+  if (window.ShopCheckCapture) window.ShopCheckCapture.logEstimate(window.__lastEstimate);
 }
 
 /* ---- clear ---- */
@@ -773,6 +871,90 @@ $('#reset').addEventListener('click', () => {
   });
   document.addEventListener('click', () => dd.classList.remove('open'));
 })();
+</script>
+
+<!-- ShopCheck config: filled in at deploy time (Supabase URL + anon key are publishable). -->
+<script>
+  window.SHOPCHECK_CONFIG = {
+    supabaseUrl:     "https://tgzrzsebctavzscqaplv.supabase.co",
+    supabaseAnonKey: "sb_publishable_A2rPoER-ya0uLvkSTKr3fg_5CgkswdB",
+    partsEndpoint:   ""    // set to "/api/parts" once the eBay function is deployed
+  };
+</script>
+
+<!-- Capture + measurement layer. Inserts are anonymous; relies on insert-only RLS. -->
+<script type="module">
+  const cfg = window.SHOPCHECK_CONFIG || {};
+  let sb = null;
+  if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
+    try {
+      const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+      sb = createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+    } catch (e) { console.warn('Supabase init skipped:', e); }
+  }
+
+  const sid = (() => {
+    let s = sessionStorage.getItem('sc_sid');
+    if (!s) { s = crypto.randomUUID(); sessionStorage.setItem('sc_sid', s); }
+    return s;
+  })();
+
+  let lastLogged = '';
+  window.ShopCheckCapture = {
+    async logEstimate(est) {
+      if (!sb || !est) return;
+      const key = `${est.repair}|${est.zip}|${est.total}`;
+      if (key === lastLogged) return;          // dedupe rapid recompute
+      lastLogged = key;
+      try {
+        await sb.from('shopcheck_estimates').insert({
+          session_id: sid, repair: est.repair, zip: est.zip, vehicle: est.vehicle,
+          total: est.total, low: est.low, high: est.high, region: est.region,
+          parts_source: est.parts_source, referrer: document.referrer || null
+        });
+      } catch (e) { /* silent: measurement must never break UX */ }
+    },
+    async captureLead(email, est) {
+      if (!sb) return { ok: false, reason: 'not_configured' };
+      try {
+        const { error } = await sb.from('shopcheck_leads').insert({
+          session_id: sid, email, estimate: est || null, referrer: document.referrer || null
+        });
+        if (error) throw error;
+        return { ok: true };
+      } catch (e) { return { ok: false, reason: e.message || 'error' }; }
+    }
+  };
+
+  // Lead capture wiring
+  const emailEl = document.getElementById('leadEmail');
+  const btn = document.getElementById('leadBtn');
+  const msg = document.getElementById('captureMsg');
+  const box = document.getElementById('capture');
+  const valid = e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+  async function submitLead() {
+    const email = (emailEl.value || '').trim();
+    msg.className = 'capture-msg';
+    if (!valid(email)) { msg.textContent = 'Enter a valid email.'; msg.classList.add('bad'); return; }
+    btn.disabled = true; msg.textContent = 'Sending…';
+    const res = await window.ShopCheckCapture.captureLead(email, window.__lastEstimate || null);
+    if (res.ok) {
+      box.classList.add('done');
+      msg.textContent = "Done — we'll email your estimate and watch for overcharges.";
+      msg.classList.add('ok');
+    } else if (res.reason === 'not_configured') {
+      msg.textContent = 'Capture not live yet (backend pending).'; msg.classList.add('bad');
+      btn.disabled = false;
+    } else {
+      msg.textContent = 'Something went wrong — try again.'; msg.classList.add('bad');
+      btn.disabled = false;
+    }
+  }
+  if (btn) {
+    btn.addEventListener('click', submitLead);
+    emailEl.addEventListener('keydown', e => { if (e.key === 'Enter') submitLead(); });
+  }
 </script>
 </body>
 </html>
