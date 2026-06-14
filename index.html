@@ -318,7 +318,7 @@
     <header class="bar">
       <div class="brand"><span class="brand-mark">S</span> ShopCheck</div>
       <div class="bar-right">
-        <div class="bar-tag">Fair-price calculator</div>
+        <div class="bar-tag">Compare your quote — know before you pay</div>
         <div class="theme-menu">
           <button class="theme-btn" id="themeToggle">Theme ▾</button>
           <div class="theme-dropdown" id="themeDropdown">
@@ -427,11 +427,11 @@
 
           <div class="explain-note">
             <span class="i">💡</span>
-            <span>A shop adding <b>10–30%</b> for inspection or small extras is normal. If a quote sits well above the right edge of the bar, get a second opinion.</span>
+            <span>A shop adding <b>10–30%</b> for inspection or small extras is normal. If your quote exceeds <b id="rActionHint">the high estimate</b>, ask for a line-item breakdown or get a second opinion. <span style="opacity:.7;font-size:12px;">Estimates based on regional labor rates and typical parts pricing.</span></span>
           </div>
 
           <div class="capture" id="capture">
-            <div class="capture-head">Get this estimate + a heads-up if you're being overcharged</div>
+            <div class="capture-head">Email me this estimate + questions to ask my mechanic</div>
             <div class="capture-row">
               <input type="email" id="leadEmail" placeholder="you@email.com" autocomplete="email">
               <button id="leadBtn">Send it</button>
@@ -831,6 +831,8 @@ async function recompute() {
   $('#rPartsSub').textContent = res.partsCost > 0
     ? (res.partsSource === 'live' ? `Live market price · ${res.partsCount} listings` : 'Typical part price. Brand-name can run higher.')
     : 'Mostly labor — no major part to buy.';
+  const hintEl = $('#rActionHint');
+  if (hintEl) hintEl.textContent = money(res.high);
   card.classList.add('has-result');
 
   // Expose current estimate for capture + log the run (this is how the GTM test is measured)
